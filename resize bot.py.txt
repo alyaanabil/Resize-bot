@@ -1,0 +1,140 @@
+import os
+import asyncio
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+import subprocess
+
+TOKEN = "YOUR_BOT_TOKEN_HERE"
+
+# إعدادات الجودة
+QUALITY_PRESETS = {
+    "high": {"crf": 23, "size": "70%", "name": "عالية 🔥"},
+    "medium": {"crf": 28, "size": "50%", "name": "متوسطة ⚡"},
+    "low": {"crf": 32, "size": "30%", "name": "منخفضة 📉"}
+}
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "أهلاً! 🎬\n\n"
+        "أرسل فيديو وسأقوم بضغطه لك\n"
+        "استخدم /help لمعرفة المزيد"
+    )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📹 كيفية الاستخدام:\n\n"
+        "1. أرسل الفيديو\n"
+        "2. اختر الجودة المطلوبة\n"
+        "3. انتظر الضغط\n\n"
+        "✨ الجودة العالية = حجم أقل مع جودة ممتازة\n"
+        "⚡ الجودة المتوسطة = توازن بين الحجم والجودة\n"
+        "📉 الجودة المنخفضة = أصغر حجم ممكن"
+    )
+
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    video = update.message.video or update.message.document
+    
+    if not video:
+        return
+    
+    # حفظ معلومات الفيديو
+    context.user_data['video_file_id'] = video.file_id
+    context.user_data['video_size'] = video.file_size
+    
+    # إنشاء لوحة الاختيارات
+    keyboard = [
+        [InlineKeyboardButton(QUALITY_PRESETS["high"]["name"], callback_data="high")],
+        [InlineKeyboardButton(QUALITY_PRESETS["medium"]["name"], callback_data="medium")],
+        [InlineKeyboardButton(QUALITY_PRESETS["low"]["name"], callback_data="low")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    size_mb = video.file_size / (1024 * 1024)
+    await update.message.reply_text(
+        f"📊 حجم الفيديو: {size_mb:.1f} MB\n\n"
+        f"اختر الجودة المطلوبة:",
+        reply_markup=reply_markup
+    )
+
+async def compress_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    quality = query.data
+    preset = QUALITY_PRESETS[quality]
+    
+    msg = await query.message.reply_text("⏳ جاري التحميل...")
+    
+    try:
+        # تحميل الفيديو
+        video_file = await context.bot.get_file(context.user_data['video_file_id'])
+        input_path = f"input_{query.from_user.id}.mp4"
+        output_path = f"output_{query.from_user.id}.mp4"
+        
+        await video_file.download_to_drive(input_path)
+        
+        await msg.edit_text("🔄 جاري الضغط...")
+        
+        # ضغط الفيديو باستخدام FFmpeg
+        cmd = [
+            "ffmpeg", "-i", input_path,
+            "-c:v", "libx264",
+            "-crf", str(preset["crf"]),
+            "-preset", "fast",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-movflags", "+faststart",
+            "-y", output_path
+        ]
+        
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        await process.communicate()
+        
+        if os.path.exists(output_path):
+            # حساب نسبة الضغط
+            original_size = os.path.getsize(input_path) / (1024 * 1024)
+            compressed_size = os.path.getsize(output_path) / (1024 * 1024)
+            reduction = ((original_size - compressed_size) / original_size) * 100
+            
+            await msg.edit_text("📤 جاري الرفع...")
+            
+            # إرسال الفيديو المضغوط
+            with open(output_path, 'rb') as video:
+                await query.message.reply_video(
+                    video=video,
+                    caption=f"✅ تم الضغط بنجاح!\n\n"
+                            f"📊 الحجم الأصلي: {original_size:.1f} MB\n"
+                            f"📉 الحجم الجديد: {compressed_size:.1f} MB\n"
+                            f"💾 تم التوفير: {reduction:.0f}%"
+                )
+            
+            await msg.delete()
+        else:
+            await msg.edit_text("❌ حدث خطأ في الضغط")
+        
+    except Exception as e:
+        await msg.edit_text(f"❌ خطأ: {str(e)}")
+    
+    finally:
+        # حذف الملفات المؤقتة
+        for path in [input_path, output_path]:
+            if os.path.exists(path):
+                os.remove(path)
+
+def main():
+    app = Application.builder().token(TOKEN).build()
+    
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
+    app.add_handler(CallbackQueryHandler(compress_video))
+    
+    print("🤖 البوت يعمل الآن...")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
